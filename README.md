@@ -64,3 +64,6 @@ API endpoint: https://apidocs.li.fi/reference/get_quote (keep the sameChain Id f
 
 - **Paraswap API**
 API endpoint: https://app.swaggerhub.com/apis/paraswapv5/api/1.0#/prices/get_prices
+
+-  **Cowswap API**
+API endpoint: https://api.cow.fi/mainnet/api/v1/quote
