@@ -9,8 +9,8 @@ Created on Sat Oct 26 08:42:42 2024
 # config.py
 
 # API Keys
-INCH_API_KEY = "IDPPI9i0SSOIptyECl9wJcAlH8Cxrjln"
-ZERO_X_API_KEY = "547fad70-906a-43ca-b3cc-d3a6902d5667"
+INCH_API_KEY = "XX"
+ZERO_X_API_KEY =  "XX"
 
 # URLs
 COWSWAP_URL = "https://api.cow.fi/mainnet/api/v1/quote"
