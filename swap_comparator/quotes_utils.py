@@ -10,6 +10,7 @@ Created on Sat Oct 26 08:43:11 2024
 
 import pandas as pd
 import requests
+import time
 from typing import Optional, Dict
 from quotes_config import (
     INCH_API_KEY, ZERO_X_API_KEY, COWSWAP_URL, ODOS_URL,
@@ -178,6 +179,8 @@ def get_unified_quotes_for_routes(amounts: list, networks: list) -> None:
         if network not in NETWORK_CONFIG:
             print(f"Skipping unknown network: {network}")
             continue
+
+        time.sleep(0.3)
             
         network_data = NETWORK_CONFIG[network]
         chain_id = network_data['chain_id']
