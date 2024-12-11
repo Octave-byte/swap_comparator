@@ -2,12 +2,20 @@
 
 from flask import Flask, request, jsonify
 import requests
+import hmac
+import hashlib
+import base64
+from datetime import datetime, timezone
+
 
 app = Flask(__name__)
 
+
 #########
-#### BRIDGES
+## BRIDGES
 ##########
+
+### RELAY
 
 def relay_quote(originChain, destinationChain, originToken, destinationToken, amount):
     url = "https://api.relay.link/price"
@@ -30,14 +38,14 @@ def relay_quote(originChain, destinationChain, originToken, destinationToken, am
         result = {
         "project": "Relay",
         "expectedAmount": float(relay["details"]["currencyOut"]["amountFormatted"]),
-        "slippage": 1 + float(relay["details"]["totalImpact"]["percent"])/100,
+        "efficiency": 1 + float(relay["details"]["totalImpact"]["percent"])/100,
         "time": relay["details"]["timeEstimate"]}
-        result['slippage'] = f"{result['slippage'] * 100:.4f}%"
+        result['efficiency'] = f"{result['efficiency'] * 100:.4f}%"
         return result
     else:
         return {}
 
-
+### Jumper
 
 def jumper_quote(originChain, destinationChain, originToken, destinationToken, amount, LIFI_KEY, price_from_amount, price_to_amount):
 
@@ -65,24 +73,124 @@ def jumper_quote(originChain, destinationChain, originToken, destinationToken, a
 
         to_amount = int(lifi["estimate"]["toAmount"]) / (10 ** lifi["action"]["toToken"]["decimals"])
         to_amount_usd = to_amount * float(price_to_amount)
-        from_amount_usd = float(price_from_amount) * int(lifi["estimate"]["fromAmount"]) / (10 ** lifi["action"]["toToken"]["decimals"])
+        from_amount_usd = float(price_from_amount) * int(lifi["estimate"]["fromAmount"]) / (10 ** lifi["action"]["fromToken"]["decimals"])
         result = {
             "project": "Jumper",
             "expectedAmount": to_amount,
-            "slippage": 1- (to_amount_usd / from_amount_usd),
+            "efficiency": to_amount_usd / from_amount_usd,
             "time": lifi["estimate"]["executionDuration"]
             }
-        result['slippage'] = f"{result['slippage'] * 100:.4f}%"
+        result['efficiency'] = f"{result['efficiency'] * 100:.4f}%"
         return result
     else:
         return {}
     return result
 
 
+### BUNGEE
+
+def bungee_quote(fromChain, toChain, fromTokenAddress, toTokenAddress, amount, price_from_amount, price_to_amount,bungee_key ):
+    if fromChain == toChain:
+        return {}
+    else:
+        response = requests.get(
+            "https://api.socket.tech/v2/quote",
+            params={
+                "fromChainId": fromChain,
+                "fromTokenAddress": fromTokenAddress,
+                "toChainId": toChain,
+                "toTokenAddress": toTokenAddress,
+                "fromAmount": int(amount),
+                "userAddress": '0x98F0f120de21a90f220B0027a9c70029Df9BBde4',
+            },
+            headers={
+                "API-KEY": bungee_key,
+                "Accept": "application/json",
+                "Content-Type": "application/json"
+            }
+        )
+        bungee = response.json()
+        to_amount = int(bungee["result"]["routes"][0]["toAmount"])/ (10 ** bungee["result"]["toAsset"]["decimals"])
+        to_amount_usd = float(price_to_amount) * to_amount
+        from_amount_usd = float(price_from_amount) * amount / (10 ** bungee["result"]["fromAsset"]["decimals"])
+        time = int(bungee["result"]["routes"][0]["serviceTime"])
+
+        result = {
+            "project": "Bungee",
+            "expectedAmount": to_amount,
+            "efficiency": to_amount_usd / from_amount_usd,
+            "time": time
+            }
+        result['efficiency'] = f"{result['efficiency'] * 100:.4f}%"
+        return result
+
+### OKX
+
+
+def okx_quote(fromChain, toChain, fromTokenAddress, toTokenAddress, amount,  price_from_amount, price_to_amount,
+              okx_project_key, okx_access_key, okx_secret_key, okx_passphrase, slippage=0.01):
+
+    if fromChain == toChain:
+        return {}
+    else:
+        amount = int(amount)
+
+        timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+
+        request_path = f'/api/v5/dex/cross-chain/quote?amount={amount}&fromChainId={fromChain}&toChainId={toChain}&fromTokenAddress={fromTokenAddress}&toTokenAddress={toTokenAddress}&slippage={slippage}'
+        url = f'https://www.okx.com{request_path}'
+
+        signature = generate_okx_signature(
+            timestamp,
+            'GET',
+            request_path,
+            okx_secret_key
+        )
+
+        headers = {
+        'Content-Type': 'application/json',
+        'OK-ACCESS-KEY': okx_access_key,
+        'OK-ACCESS-SIGN': signature,
+        'OK-ACCESS-TIMESTAMP': timestamp,
+        'OK-ACCESS-PASSPHRASE': okx_passphrase
+        }
+
+        response = requests.get(url, headers=headers)
+
+        # Process the response
+        if response.status_code == 200:
+            data = response.json()
+
+            if data['code'] == '0' and data['data']:
+                first_route = data['data'][0]
+
+                to_amount = int(data["data"][0]["routerList"][0]["toTokenAmount"]) / (10 ** data["data"][0]["toToken"]["decimals"])
+                to_amount_usd = float(price_to_amount) * to_amount
+                from_amount_usd = float(price_from_amount) * int(data["data"][0]["fromTokenAmount"]) / (10 ** data["data"][0]["fromToken"]["decimals"])
+
+
+                result = {
+                    "project": "OKX",
+                    "expectedAmount": to_amount,
+                    "efficiency": to_amount_usd / from_amount_usd,
+                    "time": int(first_route.get('routerList', [{}])[0].get('estimateTime', 0)),
+                }
+
+                result['efficiency'] = f"{result['efficiency'] * 100:.4f}%"
+
+                return result
+            else:
+                return {}
+        else:
+            return {}
+
+
 
 #########
 ### DEXES
 #########
+
+### ODOS
 
 def odos_quote(fromChain, toChain, fromTokenAddress, toTokenAddress, amount, toTokenDecimals):
     if fromChain != toChain:
@@ -95,7 +203,7 @@ def odos_quote(fromChain, toChain, fromTokenAddress, toTokenAddress, amount, toT
                 "inputTokens": [{"amount": str(int(amount)), "tokenAddress": fromTokenAddress}],
                 "outputTokens": [{"proportion": 1, "tokenAddress": toTokenAddress}],
                 "referralCode": 0,
-                "slippageLimitPercent": 0.3,
+                "slippageLimitPercent": 0.1,
                 "sourceBlacklist": [],
                 "sourceWhitelist": [],
                 "userAddr": "0xb29601eB52a052042FB6c68C69a442BD0AE90082"
@@ -113,17 +221,17 @@ def odos_quote(fromChain, toChain, fromTokenAddress, toTokenAddress, amount, toT
                 result = {
                     "project": "Odos",
                     "expectedAmount": to_amount,
-                    "slippage": 1 - odos["percentDiff"]/100,
+                    "efficiency": 1 - odos["percentDiff"]/100,
                     "time": 15
                     }
 
-                result['slippage'] = f"{result['slippage'] * 100:.4f}%"
+                result['efficiency'] = f"{result['efficiency'] * 100:.4f}%"
                 return result
         else:
                 return {}
         return result
 
-
+### 0x
 
 def zero_quote(fromChain, toChain, fromTokenAddress, toTokenAddress, amount, price_from_amount, price_to_amount, fromTokenDecimals, toTokenDecimals,zero_x_api_key):
     if fromChain != toChain:
@@ -154,17 +262,19 @@ def zero_quote(fromChain, toChain, fromTokenAddress, toTokenAddress, amount, pri
                 result = {
                     "project": "Odos",
                     "expectedAmount": to_amount,
-                    "slippage": 1- (to_amount_usd / from_amount_usd),
+                    "efficiency": 1- (to_amount_usd / from_amount_usd),
                     "time": 15
                     }
 
-                result['slippage'] = f"{result['slippage'] * 100:.4f}%"
+                result['efficiency'] = f"{result['efficiency'] * 100:.4f}%"
 
 
                 return result
         else:
                 return {}
         return result
+
+### 1inch
 
 def inch_quote(fromChain, toChain, fromTokenAddress, toTokenAddress, amount, price_from_amount, price_to_amount, fromTokenDecimals, toTokenDecimals, inch_api_key):
     if fromChain != toChain:
@@ -190,17 +300,17 @@ def inch_quote(fromChain, toChain, fromTokenAddress, toTokenAddress, amount, pri
 
                 inch = inch_response.json()
                 to_amount = int(inch["dstAmount"]) / (10 ** toTokenDecimals)
-                to_amount_usd = float(price_to_amount) * to_amount / (10 ** toTokenDecimals)
+                to_amount_usd = float(price_to_amount) * to_amount
                 from_amount_usd = float(price_from_amount) * int(amount) / (10 ** fromTokenDecimals)
 
                 result = {
                     "project": "1inch",
                     "expectedAmount": to_amount,
-                    "slippage": 1- (to_amount_usd / from_amount_usd),
+                    "efficiency": to_amount_usd / from_amount_usd,
                     "time": 15
                     }
 
-                result['slippage'] = f"{result['slippage'] * 100:.4f}%"
+                result['efficiency'] = f"{result['efficiency'] * 100:.4f}%"
 
 
                 return result
@@ -208,15 +318,24 @@ def inch_quote(fromChain, toChain, fromTokenAddress, toTokenAddress, amount, pri
                 return {}
        return result
 
+##########
+### QUOTE FUNCTION
+##########
+
 def quote(originChainSymbol, destinationChainSymbol, originTokenSymbol, destinationTokenSymbol, amountRaw):
-    LIFI_KEY= "XXX"
+
+    lifi_key= "XXX"
     inch_api_key = "XXX"
     zero_x_api_key = "XXX"
-
+    bungee_key = 'XXX'
+    okx_project_key = 'XXX'
+    okx_access_key = 'XXX'
+    okx_secret_key = 'XXX'
+    okx_passphrase = 'XXX'
 
     headers = {
         "accept": "application/json",
-        "x-lifi-api-key": LIFI_KEY
+        "x-lifi-api-key": lifi_key
         }
 
     # MAP: Chain -> ChainId
@@ -247,14 +366,34 @@ def quote(originChainSymbol, destinationChainSymbol, originTokenSymbol, destinat
     toTokenDecimals = token_2["decimals"]
 
 
-    jumper = jumper_quote(originChain, destinationChain, originToken, destinationToken, amount, LIFI_KEY, price_from_amount, price_to_amount)
+    jumper = jumper_quote(originChain, destinationChain, originToken, destinationToken, amount, lifi_key, price_from_amount, price_to_amount)
     relay = relay_quote(originChain, destinationChain, originToken, destinationToken, amount)
     odos = odos_quote(originChain, destinationChain, originToken, destinationToken, amount, toTokenDecimals)
     zero = zero_quote(originChain, destinationChain, originToken, destinationToken, amount, price_from_amount, price_to_amount, fromTokenDecimals, toTokenDecimals,zero_x_api_key)
     inch = inch_quote(originChain, destinationChain, originToken, destinationToken, amount, price_from_amount, price_to_amount, fromTokenDecimals, toTokenDecimals, inch_api_key)
+    bungee = bungee_quote(originChain, destinationChain, originToken, destinationToken, amount, price_from_amount, price_to_amount, bungee_key)
+    okx_bridge = okx_quote(originChain, destinationChain, originToken, destinationToken, amount,  price_from_amount, price_to_amount,okx_project_key, okx_access_key, okx_secret_key, okx_passphrase, slippage=0.01)
 
-    quotes = [jumper,relay,odos,zero,inch]
+    if originChainSymbol== destinationChainSymbol:
+        quotes = [jumper,relay,odos,zero,inch]
+    else:
+        quotes = [jumper,relay,bungee,okx_bridge]
+    quotes = sorted(quotes, key=lambda x: x['expectedAmount'], reverse=True)
     return quotes
+
+#########
+## HELPERS
+##########
+
+def generate_okx_signature(timestamp, method, request_path, secret_key):
+    message = f"{timestamp}{method}{request_path}"
+    # Create HMAC-SHA256 signature
+    signature = hmac.new(
+        secret_key.encode('utf-8'),
+        message.encode('utf-8'),
+        hashlib.sha256
+    ).digest()
+    return base64.b64encode(signature).decode('utf-8')
 
 @app.route('/get_quote', methods=['GET'])
 def get_quote():
